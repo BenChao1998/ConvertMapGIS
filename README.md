@@ -2,6 +2,16 @@
 
 一个基于Python的MapGIS文件转换工具，支持将MapGIS格式文件转换为Shapefile格式。
 
+## 软件界面
+
+### 主界面
+
+![日志界面](https://vip.123pan.cn/1830392062/ymjew503t0n000d7w32y6qzrq1iw0xvtDIYwDdD2DqazDpxPDwJy.png)
+
+### 日志界面
+![日志界面](https://vip.123pan.cn/1830392062/yk6baz03t0m000d7w33ga5rqxmls0ptkDIYwDdD2DqazDpxPDwJy.png)
+
+
 ## 项目由来
 
 工作之后，学习了Arcgis的使用，单位老资料普遍是用mapgis6.7做的，想要使用的话就需要先进行转换，查阅后发现目前的转换工具主要如下：
