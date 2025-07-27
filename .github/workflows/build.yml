@@ -1,0 +1,50 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v3
+
+    - name: 设置Python环境
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: 安装依赖
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller
+        pip install PyQt-Fluent-Widgets -i https://pypi.org/simple/
+        pip install pyshp
+        pip install pypinyin
+        pip install pyproj
+        pip install geopandas
+
+    - name: 打包应用
+      run: |
+        pyinstaller ConvertMapGIS.spec
+
+    - name: 压缩dist目录为zip
+      run: |
+        powershell Compress-Archive -Path dist/* -DestinationPath ConvertMapGIS.zip
+
+    - name: 上传构建产物
+      uses: actions/upload-artifact@v3
+      with:
+        name: dist
+        path: dist/
+
+    - name: 发布到GitHub Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ConvertMapGIS.zip 
