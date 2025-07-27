@@ -35,10 +35,10 @@ jobs:
 
     - name: 压缩dist目录为zip
       run: |
-        powershell Compress-Archive -Path dist/* -DestinationPath ConvertMapGIS.zip
+        powershell Compress-Archive -Path dist/* -DestinationPath ConvertMapGIS-${{ github.ref_name }}.zip
 
     - name: 上传构建产物
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: dist
         path: dist/
@@ -47,4 +47,5 @@ jobs:
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
       with:
-        files: ConvertMapGIS.zip 
+        files: ConvertMapGIS-${{ github.ref_name }}.zip
+        token: ${{ secrets.GITHUB_TOKEN }} 
