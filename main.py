@@ -21,7 +21,7 @@ from qfluentwidgets import (
 import pymapgis
 
 # ========== 新增：版本号 ==========
-VERSION = "v1.0.0"
+VERSION = "v1.0.1"
 
 # ========== 新增：资源路径工具函数 ==========
 def get_resource_path(relative_path):
@@ -82,23 +82,50 @@ class MapgisConvertConfigWidget(GroupHeaderCardWidget):
                     reader = pymapgis.MapGisReader(mapgis_file, **kwargs)
                     file_base = os.path.splitext(os.path.basename(mapgis_file))[0]
                     file_ext = os.path.splitext(mapgis_file)[1][1:].upper()
+                    # 检查crs为空但未抛异常的特殊情况
+                    if hasattr(reader, 'crs') and reader.crs == '':
+                        self.log_signal.emit(
+                            f"ℹ️ 椭球体类型为0，wkid为空，已将坐标系设置为空 | 文件：{os.path.basename(mapgis_file)}"
+                        )
+                    # 检查是否进行了数据修复
+                    elif hasattr(reader, '_data_repaired') and reader._data_repaired:
+                        self.log_signal.emit(
+                            f"⚠️ 数据已修复 | 文件：{os.path.basename(mapgis_file)} | 已自动处理属性表与几何数据不匹配问题"
+                        )
+                    else:
+                        self.log_signal.emit(
+                            f"🕐 {time.strftime('%H:%M:%S')} | ✅ 转换成功 | 文件：{os.path.basename(mapgis_file)}"
+                        )
                     
                     # 根据命名方式选择生成文件名
                     if self.use_simple_naming:
-                        # 直接替换后缀为shp
                         new_file_path = os.path.join(self.output_dir, f"{file_base}.shp")
                     else:
-                        # 保持原命名方式：文件名_扩展名.shp
                         new_file_path = os.path.join(self.output_dir, f"{file_base}_{file_ext}.shp")
                     
-                    reader.to_file(new_file_path, encoding='gb18030')
-                    del reader
-                    duration = time.time() - start_time
+                    # 保存文件
+                    reader.to_file(new_file_path)
+                    
+                    end_time = time.time()
+                    elapsed_time = end_time - start_time
                     self.log_signal.emit(
-                        f"✅ 转换完成 | 源文件：{os.path.basename(mapgis_file)} | 输出文件：{os.path.basename(new_file_path)} | 耗时：{duration:.2f}秒"
+                        f"🕐 {time.strftime('%H:%M:%S')} | ✅ 转换完成 | 文件：{os.path.basename(mapgis_file)} | 耗时：{elapsed_time:.2f}秒"
                     )
+                    
                 except Exception as e:
-                    self.log_signal.emit(f"❌ 转换失败 | 文件：{os.path.basename(mapgis_file)} | 错误：{e}")
+                    import traceback
+                    err_type = type(e).__name__
+                    err_detail = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
+                    
+                    # 针对KeyError 0特殊提示
+                    if isinstance(e, KeyError) and e.args and e.args[0] == 0:
+                        self.log_signal.emit(
+                            f"❌ 转换失败 | 文件：{os.path.basename(mapgis_file)} | 错误：椭球体类型为0，未在代码字典中定义，建议用MapGIS重新设置坐标系并保存，或联系开发者。"
+                        )
+                    else:
+                        self.log_signal.emit(
+                            f"❌ 转换失败 | 文件：{os.path.basename(mapgis_file)} | 错误类型：{err_type} | 详情：{err_detail}"
+                        )
                 current += 1
                 self.progress_signal.emit(current, total)
             self.log_signal.emit('🎉 全部转换完成！')

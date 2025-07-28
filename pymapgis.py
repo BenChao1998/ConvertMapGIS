@@ -17,7 +17,7 @@ class MapGisReader:
     def __init__(self, filepath, scale_factor=None, wkid=None):
         self.element_count = 0
         self.wkid = wkid
-        self.coordinate_scale = scale_factor / 1000 if scale_factor is not None else None
+        self.coordinate_scale = scale_factor if scale_factor is not None else None
         self.filepath = filepath
         self.file = open(filepath, 'rb')
         self.shape_type = self._detect_shape_type()
@@ -133,7 +133,11 @@ class MapGisReader:
                     try:
                         attr.append(value.decode('gbk').strip('\x00'))
                     except UnicodeDecodeError as err:
-                        attr.append(value[:int(re.search(r'in position (\\d+)', str(err)).group(1))].decode('gbk'))
+                        m = re.search(r'in position (\\d+)', str(err))
+                        if m:
+                            attr.append(value[:int(m.group(1))].decode('gbk'))
+                        else:
+                            attr.append(value.decode('gbk', errors='replace').strip('\x00'))
             data.append(attr)
         self.data = pd.DataFrame(data, columns=field_names)
         # 合并更多信息
@@ -335,78 +339,84 @@ class MapGisReader:
 
     def _parse_polygons(self):
         """解析面要素几何。"""
-        self._parse_crs()
-        start, vol = struct.unpack('2i', self.headers[0][:-2])
-        self.file.seek(start)
-        k = vol // 57
-        self.file.read(57)
-        points, points_offset = [], []
-        for _ in range(k - 1):
-            self.file.read(10)
-            points.append(struct.unpack('1i', self.file.read(4))[0])
-            points_offset.append(struct.unpack('1i', self.file.read(4))[0])
-            self.file.read(39)
-        start, _ = struct.unpack('2i', self.headers[1][:-2])
-        self.coords = []
-        for i in range(k - 1):
-            self.file.seek(start + points_offset[i])
-            self.coords.append(struct.unpack(f'{points[i]*2}d', self.file.read(points[i]*16)))
-        scale = self.coordinate_scale if self.coordinate_scale is not None else 1
-        geom_lines = [shapely.geometry.LineString(np.array(i).reshape(-1, 2) * scale) for i in self.coords]
-        start, vol = struct.unpack('2i', self.headers[3][:-2])
-        self.file.seek(start)
-        self.file.read(24)
-        temp = []
-        for _ in range(int(vol / 24 - 1)):
-            temp.append(struct.unpack('4i', self.file.read(16)))
-            self.file.read(8)
-        temp = np.array(temp)
-        temp = np.hstack((temp, np.arange(temp.shape[0]).reshape((-1, 1))))
-        self.geom = []
-        for i in set(temp[:, 2:4].flatten()) - {0}:
-            mask = (temp[:, 2] == i) | (temp[:, 3] == i)
-            x = temp[mask]
-            mask_ = x[:, 2] == i
-            kk = x[mask_]
-            t = kk[:, 0].copy()
-            kk[:, 0] = kk[:, 1]
-            kk[:, 1] = t
-            x[mask_] = kk
-            if x.shape[0] == 1:
-                poly = list(geom_lines[x[0][-1]].coords)
-                self.geom.append(shapely.geometry.Polygon(poly))
+        try:
+            self._parse_crs()
+            start, vol = struct.unpack('2i', self.headers[0][:-2])
+            self.file.seek(start)
+            k = vol // 57
+            self.file.read(57)
+            points, points_offset = [], []
+            for _ in range(k - 1):
+                self.file.read(10)
+                points.append(struct.unpack('1i', self.file.read(4))[0])
+                points_offset.append(struct.unpack('1i', self.file.read(4))[0])
+                self.file.read(39)
+            start, _ = struct.unpack('2i', self.headers[1][:-2])
+            self.coords = []
+            for i in range(k - 1):
+                self.file.seek(start + points_offset[i])
+                self.coords.append(struct.unpack(f'{points[i]*2}d', self.file.read(points[i]*16)))
+            scale = self.coordinate_scale if self.coordinate_scale is not None else 1
+            geom_lines = [shapely.geometry.LineString(np.array(i).reshape(-1, 2) * scale) for i in self.coords]
+            start, vol = struct.unpack('2i', self.headers[3][:-2])
+            self.file.seek(start)
+            self.file.read(24)
+            temp = []
+            for _ in range(int(vol / 24 - 1)):
+                temp.append(struct.unpack('4i', self.file.read(16)))
+                self.file.read(8)
+            temp = np.array(temp)
+            temp = np.hstack((temp, np.arange(temp.shape[0]).reshape((-1, 1))))
+            self.geom = []
+            for i in set(temp[:, 2:4].flatten()) - {0}:
+                mask = (temp[:, 2] == i) | (temp[:, 3] == i)
+                x = temp[mask]
+                mask_ = x[:, 2] == i
+                kk = x[mask_]
+                t = kk[:, 0].copy()
+                kk[:, 0] = kk[:, 1]
+                kk[:, 1] = t
+                x[mask_] = kk
+                if x.shape[0] == 1:
+                    poly = list(geom_lines[x[0][-1]].coords)
+                    self.geom.append(shapely.geometry.Polygon(poly))
+                else:
+                    m = [list(geom_lines[ii[-1]].coords) for ii in x]
+                    lines = []
+                    while m:
+                        ring = m.pop(0)
+                        changed = True
+                        while changed and m:
+                            changed = False
+                            for idx, seg in enumerate(m):
+                                if np.allclose(ring[-1], seg[0]):
+                                    ring.extend(seg[1:])
+                                    m.pop(idx)
+                                    changed = True
+                                    break
+                                elif np.allclose(ring[-1], seg[-1]):
+                                    ring.extend(seg[-2::-1])
+                                    m.pop(idx)
+                                    changed = True
+                                    break
+                                elif np.allclose(ring[0], seg[-1]):
+                                    ring = seg[:-1] + ring
+                                    m.pop(idx)
+                                    changed = True
+                                    break
+                                elif np.allclose(ring[0], seg[0]):
+                                    ring = seg[::-1][:-1] + ring
+                                    m.pop(idx)
+                                    changed = True
+                                    break
+                        lines.append(ring)
+                    lines = [i for i in lines if len(i) > 2]
+                    self.geom.append(shapely.geometry.MultiPolygon(get_multipolygons(lines)))
+        except struct.error as e:
+            if 'unpack requires a buffer of' in str(e):
+                raise Exception("原mapgis文件异常，无法转换，请检查该文件在mapgis中是否能正常保存") from e
             else:
-                m = [list(geom_lines[ii[-1]].coords) for ii in x]
-                lines = []
-                while m:
-                    ring = m.pop(0)
-                    changed = True
-                    while changed and m:
-                        changed = False
-                        for idx, seg in enumerate(m):
-                            if np.allclose(ring[-1], seg[0]):
-                                ring.extend(seg[1:])
-                                m.pop(idx)
-                                changed = True
-                                break
-                            elif np.allclose(ring[-1], seg[-1]):
-                                ring.extend(seg[-2::-1])
-                                m.pop(idx)
-                                changed = True
-                                break
-                            elif np.allclose(ring[0], seg[-1]):
-                                ring = seg[:-1] + ring
-                                m.pop(idx)
-                                changed = True
-                                break
-                            elif np.allclose(ring[0], seg[0]):
-                                ring = seg[::-1][:-1] + ring
-                                m.pop(idx)
-                                changed = True
-                                break
-                    lines.append(ring)
-                lines = [i for i in lines if len(i) > 2]
-                self.geom.append(shapely.geometry.MultiPolygon(get_multipolygons(lines)))
+                raise
 
     def _parse_crs(self):
         """解析坐标系信息。"""
@@ -431,7 +441,11 @@ class MapGisReader:
             116: '+ellps=clrk80 +towgs84=-166,-15,204,0,0,0,0',
             'cgcs2000': '+ellps=GRS80',
         }
-        if (ellipsoid not in ellip_dict) or (self.coordinate_scale == 0) :
+        if (ellipsoid not in ellip_dict) or (self.coordinate_scale == 0):
+            if ellipsoid == 0 and (self.wkid is None or str(self.wkid) == '0'):
+                # 椭球体类型为0且wkid为空，crs置空，主程序日志会有详细提示
+                self.crs = ''
+                return
             if scale_key == 1:
                 self.coordinate_scale = self.coordinate_scale / 1000
             else:
@@ -461,129 +475,174 @@ class MapGisReader:
 
     def _build_geodataframe(self):
         """构建 GeoDataFrame。"""
-        if self.wkid is not None:
-
-            self.geodataframe = gpd.GeoDataFrame(self.data, crs=self.crs, geometry=self.geom)
-        else:
+        # 标记是否进行了数据修复
+        self._data_repaired = False
+        
+        try:
+            # 标准流程：直接构建GeoDataFrame
             self.geodataframe = gpd.GeoDataFrame(self.data, geometry=self.geom)
-        self.bbox = np.array([
-            self.geodataframe.bounds.minx.min(),
-            self.geodataframe.bounds.miny.min(),
-            self.geodataframe.bounds.maxx.max(),
-            self.geodataframe.bounds.maxy.max()
-        ])
+            if self.crs:
+                self.geodataframe.crs = self.crs
+        except ValueError as e:
+            # 只有在出现"Length of values"错误时才进行修复
+            if "Length of values" in str(e):
+                print(f"检测到数据长度不匹配，进行智能修复...")
+                print(f"  属性表记录数: {len(self.data)}")
+                print(f"  几何对象数: {len(self.geom)}")
+                print(f"  差异: {abs(len(self.data) - len(self.geom))}")
+                
+                # 保守的修复策略：取较小的长度
+                min_length = min(len(self.data), len(self.geom))
+                print(f"  修复策略: 取前{min_length}个有效数据")
+                
+                self.data = self.data.iloc[:min_length]
+                self.geom = self.geom[:min_length]
+                self._data_repaired = True
+                
+                # 重新构建GeoDataFrame
+                self.geodataframe = gpd.GeoDataFrame(self.data, geometry=self.geom)
+                if self.crs:
+                    self.geodataframe.crs = self.crs
+                
+                print(f"  修复完成 - 属性表: {len(self.data)}, 几何数据: {len(self.geom)}")
+            else:
+                # 其他ValueError直接抛出
+                raise
 
     def to_file(self, filepath, **kwargs):
-        """导出为文件（如 shp），自动处理字段名。"""
-        def sanitize_field_names(df):
-            # 英文字段名映射，所有本代码自动添加的字段名都用英文且<=10字符
-            field_map = {
-                'ID': 'ID',
-                '坐标X': 'CoordX',
-                '坐标Y': 'CoordY',
-                '点类型': 'PntType',
-                '透明输出': 'TransOut',
-                '颜色': 'Color',
-                '字符串': 'StrText',
-                '字符高度': 'CharH',
-                '字符宽度': 'CharW',
-                '字符间隔': 'CharSpc',
-                '字符串角度': 'StrAng',
-                '中文字体': 'FontCN',
-                '西文字体': 'FontEN',
-                '字形': 'FontSty',
-                '排列': 'Arrange',
-                '子图号': 'SubNo',
-                '子图高': 'SubH',
-                '子图宽': 'SubW',
-                '子图角度': 'SubAng',
-                '子图线宽': 'SubLW',
-                '子图辅色': 'SubCol2',
-                '圆半径': 'CRadius',
-                '圆轮廓颜色': 'CCLR',
-                '圆笔宽': 'CPenW',
-                '圆填充': 'CFill',
-                '弧半径': 'ARadius',
-                '弧起始角度': 'AStartAng',
-                '弧终止角度': 'AEndAng',
-                '弧笔宽': 'APenW',
-                '线型': 'LineType',
-                '线颜色': 'LineCol',
-                '线宽': 'LineWid',
-                '线类型': 'LineKind',
-                'X系数': 'XFact',
-                'Y系数': 'YFact',
-                '辅助颜色': 'AuxCol',
-                '填充颜色': 'FillCol',
-                '填充符号': 'FillSym',
-                '图案高度': 'PatH',
-                '图案宽度': 'PatW',
-                '图案颜色': 'PatCol',
-                '锚点数目': 'AncNum',
-                '锚点坐标存储位置': 'AncOff',
-            }
-            skip_fields = set(field_map.values())
-            new_columns = []
-            used = set()
-            for col in df.columns:
-                # 如果是本代码自动添加的字段，直接用英文名
-                if col in field_map:
-                    eng_col = field_map[col]
-                    # 冲突处理
-                    if eng_col in used:
-                        idx = 1
-                        new_eng_col = f"{eng_col}_{idx}"
-                        while new_eng_col in used or new_eng_col in skip_fields:
-                            idx += 1
-                            new_eng_col = f"{eng_col}_{idx}"
-                        eng_col = new_eng_col
-                    new_columns.append(eng_col)
-                    used.add(eng_col)
-                    continue
-                # 如果是skip_fields中的英文名（防止原始属性字段名与自动字段冲突）
-                if col in skip_fields:
-                    if col in used:
-                        # 转拼音并确保唯一
-                        pinyin = ''.join([i[0] for i in pypinyin.pinyin(str(col), style=pypinyin.NORMAL)])
-                        pinyin = ''.join([c if c.isalnum() or c == '_' else '_' for c in pinyin])
-                        if len(pinyin) > 10:
-                            pinyin = pinyin[:10]
-                        if not pinyin:
-                            pinyin = 'field'
-                        orig = pinyin
-                        idx = 1
-                        while pinyin in used or pinyin in skip_fields:
-                            suffix = f"_{idx}"
-                            pinyin = (orig[:10-len(suffix)] if len(orig) > 10-len(suffix) else orig) + suffix
-                            idx += 1
-                        used.add(pinyin)
-                        new_columns.append(pinyin)
-                    else:
-                        new_columns.append(col)
-                        used.add(col)
-                    continue
-                # 普通字段转拼音
-                pinyin = ''.join([i[0] for i in pypinyin.pinyin(str(col), style=pypinyin.NORMAL)])
-                pinyin = ''.join([c if c.isalnum() or c == '_' else '_' for c in pinyin])
-                if len(pinyin) > 10:
-                    pinyin = pinyin[:10]
-                if not pinyin:
-                    pinyin = 'field'
-                orig = pinyin
-                idx = 1
-                while pinyin in used or pinyin in skip_fields:
-                    suffix = f"_{idx}"
-                    pinyin = (orig[:10-len(suffix)] if len(orig) > 10-len(suffix) else orig) + suffix
-                    idx += 1
-                used.add(pinyin)
-                new_columns.append(pinyin)
-            df.columns = new_columns
-            return df
+        """保存为文件。"""
+        # 通用数值字段异常处理函数，阈值严格按shp字段宽度限制（1e12）
+        def fix_large_values(df, column_name, threshold=1e12):
+            """修复数值字段中的异常大值，保证shp字段宽度安全"""
+            if column_name in df.columns:
+                col = df[column_name]
+                if col.dtype in ['float64', 'float32', 'int64', 'int32']:
+                    large_values = (col.abs() > threshold) | (col.isnull())
+                    if large_values.any():
+                        print(f"检测到{large_values.sum()}个{column_name}值超出shp字段宽度限制，已自动修正")
+                        df.loc[large_values, column_name] = 0.0
+        # 处理所有数值字段，阈值为1e12
+        numeric_columns = self.geodataframe.select_dtypes(include=['float64', 'float32', 'int64', 'int32']).columns
+        for col in numeric_columns:
+            fix_large_values(self.geodataframe, col, threshold=1e12)
+        # 处理字段名（转换为英文，避免pyogrio警告）
         if filepath.split('.')[-1] == 'shp':
-            self.geodataframe = sanitize_field_names(self.geodataframe)
-            self.geodataframe.to_file(filepath, **kwargs)
-        else:
-            self.geodataframe.to_file(filepath, **kwargs)
+            self.geodataframe = self._sanitize_field_names(self.geodataframe)
+        # 保存文件
+        self.geodataframe.to_file(filepath, **kwargs)
+    
+    def _sanitize_field_names(self, df):
+        """处理字段名，将中文转换为英文。"""
+        # 英文字段名映射
+        field_map = {
+            'ID': 'ID',
+            '面积': 'Area',
+            '周长': 'Perimeter',
+            'GB': 'GB',
+            'Shape_Leng': 'Shape_Leng',
+            'Shape_Area': 'Shape_Area',
+            'ID-1': 'ID_1',
+            '填充颜色': 'FillColor',
+            '填充符号': 'FillSymbol',
+            '图案高度': 'PatternH',
+            '图案宽度': 'PatternW',
+            '图案颜色': 'PatternC',
+            '坐标X': 'CoordX',
+            '坐标Y': 'CoordY',
+            '点类型': 'PntType',
+            '透明输出': 'TransOut',
+            '颜色': 'Color',
+            '字符串': 'StrText',
+            '字符高度': 'CharH',
+            '字符宽度': 'CharW',
+            '字符间隔': 'CharSpc',
+            '字符串角度': 'StrAng',
+            '中文字体': 'FontCN',
+            '西文字体': 'FontEN',
+            '字形': 'FontSty',
+            '排列': 'Arrange',
+            '子图号': 'SubNo',
+            '子图高': 'SubH',
+            '子图宽': 'SubW',
+            '子图角度': 'SubAng',
+            '子图线宽': 'SubLW',
+            '子图辅色': 'SubCol2',
+            '圆半径': 'CRadius',
+            '圆轮廓颜色': 'CCLR',
+            '圆笔宽': 'CPenW',
+            '圆填充': 'CFill',
+            '弧半径': 'ARadius',
+            '弧起始角度': 'AStartAng',
+            '弧终止角度': 'AEndAng',
+            '弧笔宽': 'APenW',
+            '线型': 'LineType',
+            '线颜色': 'LineCol',
+            '线宽': 'LineWid',
+            '线类型': 'LineKind',
+            'X系数': 'XFact',
+            'Y系数': 'YFact',
+            '辅助颜色': 'AuxCol',
+        }
+        
+        new_columns = []
+        used = set()
+        
+        for col in df.columns:
+            if col in field_map:
+                # 使用映射的英文字段名
+                eng_col = field_map[col]
+                # 处理重复字段名
+                if eng_col in used:
+                    idx = 1
+                    new_eng_col = f"{eng_col}_{idx}"
+                    while new_eng_col in used:
+                        idx += 1
+                        new_eng_col = f"{eng_col}_{idx}"
+                    eng_col = new_eng_col
+                new_columns.append(eng_col)
+                used.add(eng_col)
+            else:
+                # 对于未映射的字段，使用拼音转换
+                try:
+                    import pypinyin
+                    pinyin = ''.join([i[0] for i in pypinyin.pinyin(str(col), style=pypinyin.NORMAL)])
+                    pinyin = ''.join([c if c.isalnum() or c == '_' else '_' for c in pinyin])
+                    if len(pinyin) > 10:
+                        pinyin = pinyin[:10]
+                    if not pinyin:
+                        pinyin = 'field'
+                    
+                    # 处理重复字段名
+                    orig = pinyin
+                    idx = 1
+                    while pinyin in used:
+                        suffix = f"_{idx}"
+                        pinyin = (orig[:10-len(suffix)] if len(orig) > 10-len(suffix) else orig) + suffix
+                        idx += 1
+                    
+                    new_columns.append(pinyin)
+                    used.add(pinyin)
+                except ImportError:
+                    # 如果没有pypinyin，使用简单的英文转换
+                    eng_name = ''.join([c if c.isalnum() or c == '_' else '_' for c in str(col)])
+                    if len(eng_name) > 10:
+                        eng_name = eng_name[:10]
+                    if not eng_name:
+                        eng_name = 'field'
+                    
+                    # 处理重复字段名
+                    orig = eng_name
+                    idx = 1
+                    while eng_name in used:
+                        suffix = f"_{idx}"
+                        eng_name = (orig[:10-len(suffix)] if len(orig) > 10-len(suffix) else orig) + suffix
+                        idx += 1
+                    
+                    new_columns.append(eng_name)
+                    used.add(eng_name)
+        
+        df.columns = new_columns
+        return df
 
     def __len__(self):
         return len(self.geom)
